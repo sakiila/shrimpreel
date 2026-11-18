@@ -35,9 +35,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const signOut = useCallback(async () => {
-    await api('/api/auth/logout', { method: 'POST', json: {} })
+    const { oneTapNonce } = await api<{ oneTapNonce?: string | null }>('/api/auth/logout', { method: 'POST', json: {} })
+    setOneTapNonce(oneTapNonce ?? null)
     setUser(null)
-    setOneTapNonce(null)
     // 共用电脑：退出登录时一并清掉还没用的照片草稿
     await clearDraft()
   }, [])
@@ -91,18 +91,26 @@ type GoogleId = {
 }
 
 function GoogleOneTap({ clientId, initialNonce, onSignedIn }: { clientId: string; initialNonce: string | null; onSignedIn: () => Promise<void> }) {
-  const initialNonceRef = useRef(initialNonce)
+  const fallbackNonce = useRef<Promise<string | null> | null>(null)
   useEffect(() => {
     if (location.pathname.startsWith('/admin') || location.pathname.includes('sign-in')) return
     let cancelled = false
-    let nonce: Promise<string | null> | null = null
+    let prompted = false
+    const googleId = () => (window as unknown as { google?: GoogleId }).google?.accounts.id
+    // 首屏和退出登录时随会话响应下发 nonce。effect 重跑时沿用同一次签发。
+    const nonce = initialNonce ?? (fallbackNonce.current ??= api<{ nonce: string }>('/api/auth/google/nonce')
+      .then((data) => data.nonce)
+      .catch((error) => {
+        console.error('one tap nonce failed', error)
+        return null
+      }))
     const start = async () => {
-      const google = (window as unknown as { google?: GoogleId }).google
+      const google = googleId()
       if (cancelled || !google) return
       // 服务端签发的 nonce 同时存在 cookie 里，提交 credential 时核对，防止截获的 id_token 被重放
       const value = await nonce
       if (cancelled || !value) return
-      google.accounts.id.initialize({
+      google.initialize({
         client_id: clientId,
         nonce: value,
         auto_select: false,
@@ -110,6 +118,7 @@ function GoogleOneTap({ clientId, initialNonce, onSignedIn }: { clientId: string
         itp_support: true,
         use_fedcm_for_prompt: true,
         callback: async ({ credential }: { credential: string }) => {
+          if (cancelled) return
           try {
             await api('/api/auth/google/one-tap', { json: { credential } })
             await onSignedIn()
@@ -121,34 +130,25 @@ function GoogleOneTap({ clientId, initialNonce, onSignedIn }: { clientId: string
           }
         },
       })
-      google.accounts.id.prompt()
+      prompted = true
+      google.prompt()
     }
-    // 优先使用 /api/me 随会话下发的 One Tap nonce，减少一次冷启动网络请求；退出登录后等场景回退单独拉取
-    const preissued = initialNonceRef.current
-    initialNonceRef.current = null
-    nonce = preissued
-      ? Promise.resolve(preissued)
-      : api<{ nonce: string }>('/api/auth/google/nonce')
-          .then((data) => data.nonce)
-          .catch((error) => {
-            console.error('one tap nonce failed', error)
-            return null
-          })
     const existing = document.querySelector<HTMLScriptElement>('script[data-gsi]')
-    if (existing) {
-      void start()
-    } else {
-      const script = document.createElement('script')
+    const script = existing ?? document.createElement('script')
+    if (!existing) {
       script.src = 'https://accounts.google.com/gsi/client'
       script.async = true
       script.dataset.gsi = '1'
-      script.onload = () => void start()
-      document.head.appendChild(script)
     }
+    // script 标签存在时仍可能在加载，重挂载的 effect 也要订阅完成事件。
+    if (googleId()) void start()
+    else script.addEventListener('load', start)
+    if (!existing) document.head.appendChild(script)
     return () => {
       cancelled = true
-      ;(window as unknown as { google?: GoogleId }).google?.accounts.id.cancel()
+      script.removeEventListener('load', start)
+      if (prompted) googleId()?.cancel()
     }
-  }, [clientId, onSignedIn])
+  }, [clientId, initialNonce, onSignedIn])
   return null
 }

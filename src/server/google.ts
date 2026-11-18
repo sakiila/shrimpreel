@@ -74,7 +74,11 @@ export async function exchangeGoogleCode(
 }
 
 // 同时用于 redirect 回调拿到的 id_token 和 One Tap 的 credential；nonce 必须和本站签发、存在 cookie 里的一致
-export async function verifyGoogleIdToken(idToken: string, clientId: string, expectedNonce: string): Promise<GoogleProfile> {
+export async function verifyGoogleIdToken(
+  idToken: string,
+  clientId: string,
+  expectedNonce: string | ((verifiedNonce: string) => string),
+): Promise<GoogleProfile> {
   const [headerPart, payloadPart, signaturePart] = idToken.split('.')
   if (!headerPart || !payloadPart || !signaturePart) throw new ApiError(401, 'google_invalid_id_token')
   const header = decodeJson<{ alg?: string; kid?: string }>(headerPart)
@@ -96,7 +100,9 @@ export async function verifyGoogleIdToken(idToken: string, clientId: string, exp
   }
   if (body.aud !== clientId) throw new ApiError(401, 'google_invalid_id_token')
   if (!body.exp || body.exp * 1000 <= Date.now()) throw new ApiError(401, 'google_id_token_expired')
-  if (!expectedNonce || !body.nonce || !constantTimeEqual(body.nonce, expectedNonce)) throw new ApiError(401, 'oauth_state')
+  if (typeof body.nonce !== 'string' || !body.nonce) throw new ApiError(401, 'oauth_state')
+  const nonce = typeof expectedNonce === 'function' ? expectedNonce(body.nonce) : expectedNonce
+  if (!nonce || !constantTimeEqual(body.nonce, nonce)) throw new ApiError(401, 'oauth_state')
   if (!body.sub || !body.email) throw new ApiError(401, 'google_missing_email')
   if (body.email_verified !== true) throw new ApiError(403, 'google_email_not_verified')
   return { sub: body.sub, email: body.email.toLowerCase(), name: body.name ?? null, picture: body.picture ?? null }

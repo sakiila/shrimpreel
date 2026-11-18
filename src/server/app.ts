@@ -112,15 +112,17 @@ app.post(CLIENT_ERROR_PATH, async (c) => {
   return c.body(null, 204)
 })
 
-const ONE_TAP_NONCE_COOKIE = 'g_nonce'
+const ONE_TAP_NONCE_COOKIE_PREFIX = 'g_nonce_'
+const ONE_TAP_COOKIE_PATH = '/api/auth/google/one-tap'
 
 function issueOneTapNonce(c: Context<AppContext>): string {
   const nonce = randomToken(18)
-  setCookie(c, ONE_TAP_NONCE_COOKIE, nonce, {
+  // 每个提示独立存放，其他标签页请求 /api/me 时不会覆盖正在使用的 nonce。
+  setCookie(c, ONE_TAP_NONCE_COOKIE_PREFIX + nonce, nonce, {
     httpOnly: true,
     secure: isProduction(c.env),
     sameSite: 'Strict',
-    path: '/api/auth/google',
+    path: ONE_TAP_COOKIE_PATH,
     maxAge: 600,
   })
   return nonce
@@ -209,9 +211,21 @@ app.post('/api/auth/google/one-tap', async (c) => {
   if (!clientId) throw new ApiError(503, 'google_not_configured')
   const { credential } = await readJson<{ credential: string }>(c)
   if (!credential) throw new ApiError(400, 'missing_credential')
-  const nonce = getCookie(c, ONE_TAP_NONCE_COOKIE) ?? ''
-  deleteCookie(c, ONE_TAP_NONCE_COOKIE, { path: '/api/auth/google', secure: isProduction(c.env) })
-  const profile = await verifyGoogleIdToken(credential, clientId, nonce)
+  const profile = await verifyGoogleIdToken(credential, clientId, (nonce) => {
+    if (!/^[A-Za-z0-9_-]{24}$/.test(nonce)) return ''
+    const name = ONE_TAP_NONCE_COOKIE_PREFIX + nonce
+    const value = getCookie(c, name)
+    const secure = isProduction(c.env)
+    if (value) {
+      deleteCookie(c, name, { path: ONE_TAP_COOKIE_PATH, secure })
+      return value
+    }
+    // 兼容发布前已经打开的提示。旧 cookie 最长保留 10 分钟。
+    const legacy = getCookie(c, 'g_nonce')
+    if (!legacy || !constantTimeEqual(legacy, nonce)) return ''
+    deleteCookie(c, 'g_nonce', { path: '/api/auth/google', secure })
+    return legacy
+  })
   const user = await upsertUser(c.env, {
     email: profile.email,
     name: profile.name,
@@ -247,7 +261,9 @@ app.post('/api/auth/dev-login', async (c) => {
 
 app.post('/api/auth/logout', async (c) => {
   await endSession(c)
-  return c.json({ ok: true })
+  const oneTapNonce = googleClientId(c.env) ? issueOneTapNonce(c) : null
+  c.header('Cache-Control', 'no-store')
+  return c.json({ ok: true, oneTapNonce })
 })
 
 // ---------- Uploads ----------

@@ -24,7 +24,7 @@
 | `src/server/shares.ts`、`v.$shareId` 页 | `share` |
 | `src/server/admin.ts`、`src/server/reports.ts`、`src/routes/admin/` | `admin`、`data-management`、`attribution` |
 | `src/server/settings.ts`、`src/server/runtime-config.ts`、`src/server/probes.ts` | `settings` |
-| `src/server/auth.ts`、`src/server/google.ts`、`sign-in` 页 | `sign-in`、`admin` |
+| `src/server/auth.ts`、`src/server/google.ts`、`src/lib/session.tsx`、`sign-in` 页 | `sign-in`、`admin` |
 | `src/server/email.ts`、`src/server/email-templates.ts`、`src/server/resend.ts` | `email` |
 | `src/server/alerts.ts`、`src/server/client-error.ts`、错误页、`src/lib/translate-guard.ts` | `alerts`、`client-errors` |
 | `src/server/csp.ts`、页面里的内联脚本 | `security-headers` |
@@ -201,6 +201,9 @@ e2e 跑在本地 dev server 上，支付、视频、审核服务商都是 mock�
 - `admin.spec.ts` › `后台概览显示上线配置检查：本地开发配置报错，接口只回传问题不回传密钥值`
   - 本地配置下 `APP_ENV`、`PAYMENT_PROVIDER`、`SITE_URL` 报 error，没有绑定缺失；响应里不出现 `.dev.vars` 的值。
 
+- `sign-in.spec.ts` › `退出后 One Tap 使用退出响应的 nonce，在同一页面重新登录`
+  - 用 Google SDK 替身验证退出后直接用响应给的 nonce，整个过程保持同一文档，恢复站内会话。
+
 ## P0 合规与用户数据
 
 - `compliance.spec.ts` › `举报下架：匿名在 /report 举报 → 管理员下架 → 同一原图的全部视频删除、再次上传被拦截，其它视频不受影响`
@@ -372,7 +375,7 @@ e2e 跑在本地 dev server 上，支付、视频、审核服务商都是 mock�
 | 真实支付商的订阅续费、扣款失败，Dodo 的取消与撤销；Stripe 的异步付款方式和 `refund.failed` | test 模式触发不了续费和扣款失败（要等一个计费周期）；Dodo 的取消要 API 密钥有 Subscriptions 写入，模板的 test 密钥还没有 | 首付、激活、当月积分、门户和 Waffo 的取消由 sandbox 订阅用例覆盖（2026-10-21 手动跑过）；续费和扣款失败有按文档构造的映射单元测试，e2e 用 mock 订阅事件走同一套入账逻辑 | 补上密钥权限后重跑 Dodo 订阅用例；Stripe 退款后又失败时积分不会自动恢复，靠人工处理；第一个热词站上线后观察第一次真实续费 |
 | 真实视频生成和 `/api/webhooks/fal`、`/api/webhooks/yir`、`/api/webhooks/nanoapi` 的成功回调 | 需要 `FAL_KEY`、`YIR_API_KEY` 或 `NANOAPI_API_KEY`，每次调用要付费；e2e 用 mock 服务商，靠轮询完成 | yir 的提交、查询、错误映射、实际成本和两步走（合成首帧 → 动作参考）有 provider 契约单元测试（`yir.test.ts`，按 yir 文档构造响应），进入下一步的落库由 `jobs.test.ts` 覆盖；NanoAPI 的创建、去重、查询、错误映射和成本有 `nanoapi.test.ts`，2026-10-25 用真实 key 经隧道手动跑通一单（webhook、转存 R2、实际成本、列表去重字段）；smoke 巡检检查未签名回调返回 401 | fal、yir 的 webhook 回调在第一个热词站上线后观察 |
 | 真实发信与投递 | 本地 `send_email` binding 只模拟发送 | e2e 断言发件箱记录；单元测试覆盖渲染和重试 | 线上验证随第一个热词站 |
-| Google OAuth 与 One Tap 登录 | 需要真实 Google 账号，e2e 用 dev 登录 | 单元测试覆盖跳转校验、PKCE、nonce 和按 `sub` 绑定 | 线上验证随第一个热词站 |
+| Google OAuth 与 One Tap 的真实 Google 交互 | 需要真实 Google 账号，e2e 用 SDK 替身和 dev 登录 | 单元测试覆盖跳转校验、PKCE、nonce 和按 `sub` 绑定 | 线上验证随第一个热词站 |
 | Turnstile 浏览器端校验 | 需要真实站点密钥 | 服务端校验的单元测试 | 线上验证 |
 | 成片输出审核的真实抽帧（Cloudflare Media Transformations 绑定） | 绑定在本地只有 remote 模式，会连 Cloudflare 并可能计费；模板默认不声明，e2e 的 `OUTPUT_MODERATION=mock` 只验证拒绝后的失败与退款路径 | `output-review.test.ts` 用假的 `MEDIA_TRANSFORM` 验证抽帧时间点、逐帧审核和失败语义；上线检查在 `frames` 缺绑定时报错 | 热词站声明绑定、设 `OUTPUT_MODERATION=frames` 后用 staging 实测一条（含 100 MB 附近的成片和成片短于预期时长的情况） |
 | OpenAI 图片审核的真实调用 | 需要 `OPENAI_API_KEY` | e2e 用 mock 拒绝；单元测试覆盖响应解析和失败时拒绝 | 线上验证 |

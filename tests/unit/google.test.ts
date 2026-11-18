@@ -110,7 +110,7 @@ describe('Google 授权码流程：PKCE 与 nonce', () => {
 })
 
 describe('One Tap nonce', () => {
-  it('未登录访问 /api/me 直接下发 oneTapNonce 和 g_nonce cookie；已登录时为 null', async () => {
+  it('未登录访问 /api/me 直接下发 oneTapNonce 和独立 cookie；已登录时为 null', async () => {
     const sqlite = new DatabaseSync(':memory:')
     migrate(sqlite)
     const meEnv = {
@@ -129,8 +129,8 @@ describe('One Tap nonce', () => {
     expect(guestBody.user).toBeNull()
     expect(guestBody.oneTapNonce).toMatch(/^[A-Za-z0-9_-]{24}$/)
     const guestCookie = guestRes.headers.get('set-cookie') ?? ''
-    expect(guestCookie).toContain(`g_nonce=${guestBody.oneTapNonce}`)
-    expect(guestCookie).toContain('Path=/api/auth/google')
+    expect(guestCookie).toContain(`g_nonce_${guestBody.oneTapNonce}=${guestBody.oneTapNonce}`)
+    expect(guestCookie).toContain('Path=/api/auth/google/one-tap')
     expect(guestCookie).toContain('HttpOnly')
 
     const user = await upsertUser(meEnv, { email: 'a@example.com', name: null, picture: null, googleSub: 'sub-1', country: null, locale: null })
@@ -147,21 +147,56 @@ describe('One Tap nonce', () => {
     expect(userBody.user?.id).toBe(user.id)
     expect(userBody.oneTapNonce).toBeNull()
     expect(userRes.headers.get('set-cookie')).toBeNull()
+
+    const logout = await app.request('/api/auth/logout', {
+      method: 'POST',
+      headers: { origin: meEnv.SITE_URL, cookie: `sid=${sid}` },
+    }, meEnv)
+    expect(logout.status).toBe(200)
+    expect(logout.headers.get('cache-control')).toBe('no-store')
+    const { oneTapNonce } = (await logout.json()) as { oneTapNonce: string }
+    const logoutCookies = logout.headers.getSetCookie()
+    expect(logoutCookies).toContainEqual(expect.stringContaining('sid=; Max-Age=0'))
+    const logoutCookie = logoutCookies.find((cookie) => cookie.startsWith(`g_nonce_${oneTapNonce}=${oneTapNonce};`))
+    expect(logoutCookie).toBeDefined()
+    expect(sqlite.prepare('SELECT id FROM sessions WHERE id = ?').get(sidHash)).toBeUndefined()
+
+    // 另一个标签页随后加载 /api/me，退出页仍可用自己的 nonce 重新登录。
+    const otherTab = await app.request('/api/me', {}, meEnv)
+    const otherCookie = otherTab.headers.getSetCookie()[0]!
+    expect(otherCookie.split('=')[0]).not.toBe(logoutCookie!.split('=')[0])
+    mockGoogle()
+    const credential = await idToken({ nonce: oneTapNonce })
+    const oneTap = await app.request('/api/auth/google/one-tap', {
+      method: 'POST',
+      headers: {
+        origin: meEnv.SITE_URL,
+        'content-type': 'application/json',
+        cookie: [logoutCookie!, otherCookie].map((cookie) => cookie.split(';')[0]).join('; '),
+      },
+      body: JSON.stringify({ credential }),
+    }, { ...meEnv, AUTH_LIMITER: { limit: async () => ({ success: true }) } } as unknown as Env)
+    expect(oneTap.status).toBe(200)
+    expect((await oneTap.json() as { user: { id: string } }).user.id).toBe(user.id)
+    expect(oneTap.headers.getSetCookie()).toContainEqual(expect.stringContaining(`g_nonce_${oneTapNonce}=; Max-Age=0`))
+    expect(oneTap.headers.getSetCookie()).toContainEqual(expect.stringMatching(/^sid=[^;]+;/))
+    expect(oneTap.headers.getSetCookie().some((cookie) => cookie.startsWith(otherCookie.split('=')[0]! + '='))).toBe(false)
   })
 
   it('nonce 接口把同一个值写进只发往登录接口的 cookie，且不缓存', async () => {
     const res = await app.request('/api/auth/google/nonce', {}, env)
     const { nonce } = (await res.json()) as { nonce: string }
     const cookie = res.headers.get('set-cookie') ?? ''
-    expect(cookie).toContain(`g_nonce=${nonce}`)
-    expect(cookie).toContain('Path=/api/auth/google')
+    expect(cookie).toContain(`g_nonce_${nonce}=${nonce}`)
+    expect(cookie).toContain('Path=/api/auth/google/one-tap')
     expect(cookie).toContain('HttpOnly')
     expect(res.headers.get('cache-control')).toBe('no-store')
   })
 
   it('credential 的 nonce 和 cookie 对不上（或没有 cookie）时拒绝，不会建账号', async () => {
     mockGoogle()
-    const credential = await idToken({ nonce: 'n-1' })
+    const nonce = 'a'.repeat(24)
+    const credential = await idToken({ nonce })
     const post = (cookie?: string) =>
       app.request(
         '/api/auth/google/one-tap',
@@ -172,7 +207,7 @@ describe('One Tap nonce', () => {
         },
         { ...env, AUTH_LIMITER: { limit: async () => ({ success: true }) } } as unknown as Env,
       )
-    for (const res of [await post(), await post('g_nonce=n-2')]) {
+    for (const res of [await post(), await post('g_nonce=n-2'), await post(`g_nonce_${nonce}=wrong-value`)]) {
       expect(res.status).toBe(401)
       expect(((await res.json()) as { error: string }).error).toBe('oauth_state')
     }
